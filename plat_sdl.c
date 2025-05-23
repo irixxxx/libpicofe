@@ -115,7 +115,8 @@ int plat_sdl_change_video_mode(int w, int h, int force)
   }
 
   if (plat_target.vout_method == 0 || (force && (window_w != w || window_h != h
-      || plat_target.vout_fullscreen != old_fullscreen))) {
+      || plat_target.vout_fullscreen != old_fullscreen
+      || !plat_sdl_screen->format || plat_sdl_screen->format->BitsPerPixel != 16))) {
     Uint32 flags = get_screen_flags();
     int win_w = w;
     int win_h = h;
@@ -254,15 +255,15 @@ int plat_sdl_init(void)
       g_menuscreen_h = h;
   }
 
-  plat_sdl_screen = SDL_SetVideoMode(g_menuscreen_w, g_menuscreen_h, 16,
+  plat_sdl_screen = SDL_SetVideoMode(g_menuscreen_w, g_menuscreen_h, 0,
       (flags = get_screen_flags()));
   if (plat_sdl_screen == NULL) {
     fprintf(stderr, "SDL_SetVideoMode failed: %s\n", SDL_GetError());
-    plat_sdl_screen = SDL_SetVideoMode(0, 0, 16, (flags = get_screen_flags()));
+    plat_sdl_screen = SDL_SetVideoMode(0, 0, 0, (flags = get_screen_flags()));
     if (plat_sdl_screen == NULL) {
       fprintf(stderr, "attempting SDL_SWSURFACE fallback\n");
       screen_flags = SDL_SWSURFACE;
-      plat_sdl_screen = SDL_SetVideoMode(0, 0, 16, (flags = get_screen_flags()));
+      plat_sdl_screen = SDL_SetVideoMode(0, 0, 0, (flags = get_screen_flags()));
       if (plat_sdl_screen == NULL) {
         fprintf(stderr, "SDL_SetVideoMode failed: %s\n", SDL_GetError());
         goto fail;
@@ -278,14 +279,6 @@ int plat_sdl_init(void)
   g_menuscreen_w = plat_sdl_screen->w;
   g_menuscreen_h = plat_sdl_screen->h;
   g_menuscreen_pp = g_menuscreen_w;
-
-  // overlay/gl require native bpp in some cases...
-  plat_sdl_screen = SDL_SetVideoMode(g_menuscreen_w, g_menuscreen_h,
-    0, (flags = get_screen_flags()));
-  if (plat_sdl_screen == NULL) {
-    fprintf(stderr, "SDL_SetVideoMode failed: %s\n", SDL_GetError());
-    goto fail;
-  }
   screen_flags = flags;
   window_w = plat_sdl_screen->w;
   window_h = plat_sdl_screen->h;
@@ -297,6 +290,7 @@ int plat_sdl_init(void)
       plat_sdl_overlay->format, plat_sdl_overlay->planes, *plat_sdl_overlay->pitches,
       plat_sdl_overlay->hw_overlay);
 
+    // some platforms require "native" bpp for this to work
     if (plat_sdl_overlay->hw_overlay)
       overlay_works = 1;
     else
