@@ -31,6 +31,7 @@ struct in_sdl_state {
 	int joy_numbuttons;
 	int *joy_axis_keydown;
 	int joy_hat_down;
+	unsigned int joy_axis_as_btn; // bitmask; vs axes of centered sticks
 	unsigned int redraw:1;
 	unsigned int abs_to_udlr:1;
 	unsigned int hat_warned:1;
@@ -115,6 +116,15 @@ static const char * const in_sdl_keys[SDLK_LAST] = {
 	[SDLK_y] = "y",
 	[SDLK_z] = "z",
 	[SDLK_DELETE] = "delete",
+
+	// gamepad buttons
+	#define B(x) [SDLK_WORLD_##x] = "b"#x
+	B(0), B(1), B(2), B(3), B(4), B(5), B(6), B(7),
+	B(8), B(9), B(10), B(11), B(12), B(13), B(14), B(15),
+	B(16), B(17), B(18), B(19), B(20), B(21), B(22), B(23),
+	B(24), B(25), B(26), B(27), B(28), B(29), B(30), B(31),
+	B(32), B(33), B(34), B(35), B(36), B(37), B(38), B(39),
+	#undef B
 
 	[SDLK_KP0] = "[0]",
 	[SDLK_KP1] = "[1]",
@@ -206,7 +216,7 @@ static void in_sdl_probe(const in_drv_t *drv)
 	const char * const * key_names = in_sdl_keys;
 	struct in_sdl_state *state;
 	SDL_Joystick *joy;
-	int i, joycount;
+	int i, a, joycount;
 	char name[256];
 
 	if (pdata->key_names)
@@ -235,9 +245,17 @@ static void in_sdl_probe(const in_drv_t *drv)
 		state->joy_id = i;
 		state->joy_numbuttons = SDL_JoystickNumButtons(joy);
 		state->drv = drv;
+		for (a = 0; a < state->joy_numaxes; a++)
+			if (SDL_JoystickGetAxis(joy, a) < -16384)
+				state->joy_axis_as_btn |= 1u << a;
 
 		snprintf(name, sizeof(name), IN_SDL_PREFIX "%s", SDL_JoystickName(i));
 		in_register(name, -1, state, SDLK_LAST, key_names, 0);
+
+		printf("  %s: %d buttons %d axes %d hat(s), "
+			"guessed axis_as_btn mask: %x\n",
+			name, state->joy_numbuttons, state->joy_numaxes,
+			SDL_JoystickNumHats(joy), state->joy_axis_as_btn);
 	}
 
 	if (joycount > 0)
@@ -333,8 +351,8 @@ static int handle_joy_event(struct in_sdl_state *state, SDL_Event *event,
 			// some pressure sensitive buttons appear as an axis that goes
 			// from -32768 (released) to 32767 (pressed) and there is no
 			// way to distinguish from ones centered at 0? :(
-			//else
-			//	kc = kc_axis_base + event->jaxis.axis * 2;
+			else if (!(state->joy_axis_as_btn & (1u << event->jaxis.axis)))
+				kc = kc_axis_base + event->jaxis.axis * 2;
 			down = 1;
 		}
 		else if (event->jaxis.value > 16384) {
