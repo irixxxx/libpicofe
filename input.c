@@ -123,7 +123,7 @@ void in_register(const char *nname, int drv_fd_hnd, void *drv_data,
 	int i, ret, dupe_count = 0, *binds, *kbd_binds;
 	char name[256], *name_end, *tmp;
 
-	strncpy(name, nname, sizeof(name));
+	strncpy(name, nname, sizeof(name)-12);
 	name[sizeof(name)-12] = 0;
 	name_end = name + strlen(name);
 
@@ -283,7 +283,7 @@ void in_probe(void)
 	}
 
 	/* get rid of devs without binds and probes */
-	for (i = 0; i < in_dev_count; i++) {
+	for (i = 0; i < in_dev_count && in_dev_count < IN_MAX_DEVS; i++) {
 		if (!in_devices[i].probed && in_devices[i].binds == NULL) {
 			in_dev_count--;
 			if (i < in_dev_count) {
