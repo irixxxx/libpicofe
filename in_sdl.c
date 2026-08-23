@@ -600,6 +600,8 @@ static int in_sdl_update(void *drv_data, const int *binds, int *result)
 	else
 		do_joy_events(state, NULL, NULL);
 
+	if (!binds)
+		return 0;
 	for (i = 0; i < SDLK_LAST / KEYBITS_WORD_BITS + 1; i++) {
 		mask = state->keystate[i];
 		if (mask == 0)
@@ -628,6 +630,8 @@ static int in_sdl_update_kbd(void *drv_data, const int *binds, int *result)
 	else
 		do_joy_events(state, NULL, NULL);
 
+	if (!binds)
+		return 0;
 	for (i = 0; i < SDLK_LAST / KEYBITS_WORD_BITS + 1; i++) {
 		mask = state->keystate[i];
 		if (mask == 0)
