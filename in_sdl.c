@@ -34,7 +34,6 @@ struct in_sdl_state {
 	unsigned int joy_axis_as_btn; // bitmask; vs axes of centered sticks
 	unsigned int redraw:1;
 	unsigned int abs_to_udlr:1;
-	unsigned int hat_warned:1;
 	SDL_Event revent;
 	SDL_Event mevent; // last mouse event
 	keybits_t keystate[SDLK_LAST / KEYBITS_WORD_BITS + 1];
@@ -388,8 +387,8 @@ static int handle_joy_event(struct in_sdl_state *state, SDL_Event *event,
 	case SDL_JOYHATMOTION:
 		if (event->jhat.which != state->joy_id)
 			return -2;
-		xor = event->jhat.value ^ state->joy_hat_down;
-		val = state->joy_hat_down = event->jhat.value;
+		val = event->jhat.value;
+		xor = val ^ state->joy_hat_down;
 		for (i = 0; i < 4; i++, xor >>= 1, val >>= 1) {
 			if (xor & 1) {
 				if (event->jhat.hat)
@@ -397,15 +396,14 @@ static int handle_joy_event(struct in_sdl_state *state, SDL_Event *event,
 				else
 					kc = hat2uldr[i];
 				down = val & 1;
+				state->joy_hat_down &= ~(1u << i);
+				state->joy_hat_down |= down << i;
 				ret = 1;
 				break;
 			}
 		}
-		if ((!ret || (xor >> ret)) && !state->hat_warned) {
-			// none, more than 1, or upper bits changed
-			fprintf(stderr, "in_sdl: unexpected hat behavior\n");
-			state->hat_warned = 1;
-		}
+		if ((state->joy_hat_down ^ event->jhat.value) & 0x0f)
+			ret = 2; // repeat this event
 		break;
 	default:
 		//printf("joy ev %d\n", event->type);
@@ -440,8 +438,8 @@ static int collect_events(struct in_sdl_state *state, int *one_kc, int *one_down
 	SDL_PumpEvents();
 
 	maxcount = ARRAY_SIZE(events);
-	if ((count = SDL_PeepEvents(events, maxcount, SDL_GETEVENT, mask)) > 0) {
-		for (i = 0; i < count; i++) {
+	if ((count = SDL_PeepEvents(events, maxcount, SDL_PEEKEVENT, mask)) > 0) {
+		for (i = 0; i < count; ) {
 			event = &events[i];
 			if (state->joy) {
 				ret = handle_joy_event(state,
@@ -450,6 +448,8 @@ static int collect_events(struct in_sdl_state *state, int *one_kc, int *one_down
 				ret = handle_event(state,
 					event, one_kc, one_down, &is_emukey);
 			}
+			if (ret != 2) // not a repeated event
+				i++;
 			if (ret < 0) {
 				switch (ret) {
 					case -2:
@@ -467,10 +467,10 @@ static int collect_events(struct in_sdl_state *state, int *one_kc, int *one_down
 						} else
 						if ((event->type == SDL_MOUSEBUTTONDOWN) ||
 						    (event->type == SDL_MOUSEBUTTONUP)) {
-							int mask = SDL_BUTTON(event->button.button);
+							Uint8 bmask = SDL_BUTTON(event->button.button);
 							if (event->button.state == SDL_PRESSED)
-								state->mevent.motion.state |= mask;
-							else	state->mevent.motion.state &= ~mask;
+								state->mevent.motion.state |= bmask;
+							else	state->mevent.motion.state &= ~bmask;
 						} else if (event->type == SDL_MOUSEMOTION) {
 							event->motion.xrel += state->mevent.motion.xrel;
 							event->motion.yrel += state->mevent.motion.yrel;
@@ -490,6 +490,9 @@ static int collect_events(struct in_sdl_state *state, int *one_kc, int *one_down
 			}
 		}
 	}
+	// remove the handled events
+	if (i)
+		SDL_PeepEvents(events, i, SDL_GETEVENT, mask);
 
 	// if the event queue has been emptied and resize/expose events were in it
 	if (state->redraw && count == 0) {
@@ -505,11 +508,7 @@ static int collect_events(struct in_sdl_state *state, int *one_kc, int *one_down
 		}
 		if (one_down != NULL)
 			*one_down = 1;
-	} else
-		i++;
-	// don't lose events other devices might want to handle
-	if (i < count)
-		SDL_PeepEvents(events+i, count-i, SDL_ADDEVENT, mask);
+	}
 	return retval;
 }
 
