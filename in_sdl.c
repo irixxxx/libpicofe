@@ -40,6 +40,8 @@ struct in_sdl_state {
 	unsigned int abs_to_udlr:1;
 	SDL_Event revent;
 	SDL_Event mevent; // last mouse event
+	short mousebtns; // mouse buttons pressed mask
+	short mousewheel; // mouse wheel scroll counter
 	keybits_t keystate[SDLK_LAST / KEYBITS_WORD_BITS + 1];
 	// emulator keys should always be processed immediately lest one is lost
 	keybits_t emu_keys[SDLK_LAST / KEYBITS_WORD_BITS + 1];
@@ -347,9 +349,17 @@ static int handle_input_event(struct in_sdl_state *state, const SDL_Event *event
 	case SDL_MOUSEBUTTONDOWN:
 	case SDL_MOUSEBUTTONUP:
 		bmask = SDL_BUTTON(event->button.button);
-		if (event->button.state == SDL_PRESSED)
-			state->mevent.motion.state |= bmask;
-		else	state->mevent.motion.state &= ~bmask;
+		if (event->button.state == SDL_PRESSED) {
+			// the wheel creates DOWN/UP events at the same time.
+			// the batched processing between 2 readouts would lead
+			// to them being cancelled out. count them instead.
+			if (event->button.button == SDL_BUTTON_WHEELDOWN)
+				state->mousewheel -= 1;
+			else if (event->button.button == SDL_BUTTON_WHEELUP)
+				state->mousewheel += 1;
+			else
+				state->mousebtns |= bmask;
+		} else	state->mousebtns &= ~bmask;
 		return 0;
 	case SDL_MOUSEMOTION:
 		xrel = state->mevent.motion.xrel;
@@ -688,8 +698,11 @@ static int in_sdl_update_pointer(void *drv_data, int id, int *result)
 			*result = state->mevent.motion.yrel * 2*1024/max;
 		state->mevent.motion.yrel = 0;
 		break;
+	case 9: *result = state->mousewheel;
+		state->mousewheel = 0;
+		break;
 	// buttons
-	case -1: *result = state->mevent.motion.state;
+	case -1: *result = state->mousebtns;
 		break;
 	default: return -1;
 	}
