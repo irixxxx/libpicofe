@@ -32,22 +32,24 @@ struct in_sdl_state {
 	int joy_numbuttons;
 	int joy_hat_down;
 	int *joy_axis_keydown;
-	SDL_Event *joy_events;
-	unsigned int joy_event_count;
-	unsigned int joy_event_alloc;
 	unsigned int joy_axis_as_btn; // bitmask; vs axes of centered sticks
 	unsigned int redraw:1;
 	unsigned int abs_to_udlr:1;
 	SDL_Event revent;
 	SDL_Event mevent; // last mouse event
-	short mousebtns; // mouse buttons pressed mask
+	short mousebtns;  // mouse buttons pressed mask
 	short mousewheel; // mouse wheel scroll counter
 	keybits_t keystate[SDLK_LAST / KEYBITS_WORD_BITS + 1];
 	// emulator keys should always be processed immediately lest one is lost
 	keybits_t emu_keys[SDLK_LAST / KEYBITS_WORD_BITS + 1];
-	// "parent" state tracks all joy states to write to their joy_events
+	// "parent" state tracks all joy states to write to their ev_queue
 	unsigned int joy_states_count;
+	// event queues for dispatching events to this device
+	SDL_Event *ev_queue;
+	unsigned int ev_count;
+	unsigned int ev_alloc;
 	struct in_sdl_state *parent;
+	struct in_sdl_state *mouse_state;
 	struct in_sdl_state *joy_states[0];
 };
 
@@ -134,6 +136,15 @@ static const char * const in_sdl_keys[SDLK_LAST] = {
 	B(24), B(25), B(26), B(27), B(28), B(29), B(30), B(31),
 	B(32), B(33), B(34), B(35), B(36), B(37), B(38), B(39),
 	#undef B
+
+	// mouse buttons
+	[SDLK_WORLD_81] = "left button",
+	[SDLK_WORLD_82] = "middle button",
+	[SDLK_WORLD_83] = "right button",
+	[SDLK_WORLD_84] = "wheel up",
+	[SDLK_WORLD_85] = "wheel down",
+	[SDLK_WORLD_86] = "x1 button",
+	[SDLK_WORLD_87] = "x2 button",
 
 	[SDLK_KP0] = "[0]",
 	[SDLK_KP1] = "[1]",
@@ -238,11 +249,17 @@ static void in_sdl_probe(const in_drv_t *drv)
 
 	if (!(state = state_alloc(0, joycount)))
 		return;
-
 	state->drv = drv;
 	in_register(IN_SDL_PREFIX "keys", -1, state, SDLK_LAST,
 		key_names, 0);
 	//SDL_EnableUNICODE(1);
+
+	if (pdata->mouse_device && (state->mouse_state = state_alloc(0, 0))) {
+		state->mouse_state->drv = drv;
+		state->mouse_state->parent = state;
+		in_register(IN_SDL_PREFIX "mouse", -1, state->mouse_state, SDLK_LAST,
+			key_names, 0);
+	}
 
 	for (i = 0; i < joycount; i++) {
 		struct in_sdl_state *jstate;
@@ -281,11 +298,15 @@ static void in_sdl_free(void *drv_data)
 	unsigned int i;
 
 	if (state != NULL) {
+		if (state->mouse_state)
+			state->mouse_state->parent = NULL;
 		if (state->joy != NULL)
 			SDL_JoystickClose(state->joy);
 		free(state->joy_axis_keydown);
-		free(state->joy_events);
+		free(state->ev_queue);
 		if (state->parent) {
+			if (state->parent->mouse_state == state)
+				state->parent->mouse_state = NULL;
 			for (i = 0; i < state->parent->joy_states_count; i++) {
 				if (state->parent->joy_states[i] == state) {
 					state->parent->joy_states[i] = NULL;
@@ -335,39 +356,33 @@ static int get_keystate(keybits_t *keystate, int sym)
 	return !!(*ks_word & mask);
 }
 
+static int handle_sub_event(struct in_sdl_state *state, const SDL_Event *event,
+	int *kc_out, int *down_out, int *emu_out);
+
 static int handle_input_event(struct in_sdl_state *state, const SDL_Event *event,
 	int *kc_out, int *down_out, int *emu_out)
 {
+	struct in_sdl_state *substate = NULL;
 	int emu, joy_id = -1;
-	short xrel, yrel;
-	Uint8 bmask;
+	int down, key;
 
 	switch (event->type) {
 	case SDL_KEYDOWN:
 	case SDL_KEYUP:
+		key = event->key.keysym.sym;
+		down = event->type == SDL_KEYDOWN;
 		break;
 	case SDL_MOUSEBUTTONDOWN:
 	case SDL_MOUSEBUTTONUP:
-		bmask = SDL_BUTTON(event->button.button);
-		if (event->button.state == SDL_PRESSED) {
-			// the wheel creates DOWN/UP events at the same time.
-			// the batched processing between 2 readouts would lead
-			// to them being cancelled out. count them instead.
-			if (event->button.button == SDL_BUTTON_WHEELDOWN)
-				state->mousewheel -= 1;
-			else if (event->button.button == SDL_BUTTON_WHEELUP)
-				state->mousewheel += 1;
-			else
-				state->mousebtns |= bmask;
-		} else	state->mousebtns &= ~bmask;
-		return 0;
+		substate = state->mouse_state;
+		if (!substate)
+			return handle_sub_event(state, event, kc_out, down_out, emu_out);
+		break;
 	case SDL_MOUSEMOTION:
-		xrel = state->mevent.motion.xrel;
-		yrel = state->mevent.motion.yrel;
-		state->mevent = *event;
-		state->mevent.motion.xrel += xrel;
-		state->mevent.motion.yrel += yrel;
-		return 0;
+		substate = state->mouse_state;
+		if (!substate)
+			return handle_sub_event(state, event, kc_out, down_out, emu_out);
+		break;
 	case SDL_JOYAXISMOTION:
 		joy_id = event->jaxis.which;
 		break;
@@ -384,41 +399,42 @@ static int handle_input_event(struct in_sdl_state *state, const SDL_Event *event
 
 	if (joy_id >= 0) {
 		// send to the joy queue
-		struct in_sdl_state *jstate;
 		if ((unsigned int)joy_id >= state->joy_states_count ||
 		    state->joy_states[joy_id] == NULL) {
 			assert(0);
 			return -1;
 		}
-		jstate = state->joy_states[joy_id];
-		if (jstate->joy_event_count >= jstate->joy_event_alloc) {
-			int cnt = jstate->joy_event_count + 16;
-			void *tmp = realloc(jstate->joy_events, sizeof(jstate->joy_events[0]) * cnt);
+		substate = state->joy_states[joy_id];
+	}
+
+	if (substate != NULL) {
+		if (substate->ev_count >= substate->ev_alloc) {
+			int cnt = substate->ev_count + 16;
+			void *tmp = realloc(substate->ev_queue, sizeof(substate->ev_queue[0]) * cnt);
 			if (tmp == NULL) {
 				assert(0);
 				return -1;
 			}
-			jstate->joy_events = tmp;
-			jstate->joy_event_alloc = cnt;
+			substate->ev_queue = tmp;
+			substate->ev_alloc = cnt;
 		}
-		jstate->joy_events[jstate->joy_event_count++] = *event;
+		substate->ev_queue[substate->ev_count++] = *event;
 		return 0;
 	}
 
-	emu = get_keystate(state->emu_keys, event->key.keysym.sym);
-	update_keystate(state->keystate, event->key.keysym.sym,
-		event->type == SDL_KEYDOWN);
+	emu = get_keystate(state->emu_keys, key);
+	update_keystate(state->keystate, key, down);
 	if (kc_out != NULL)
-		*kc_out = event->key.keysym.sym;
+		*kc_out = key;
 	if (down_out != NULL)
-		*down_out = event->type == SDL_KEYDOWN;
+		*down_out = down;
 	if (emu_out != NULL)
 		*emu_out = emu;
 
 	return 1;
 }
 
-static int handle_joy_event(struct in_sdl_state *state, SDL_Event *event,
+static int handle_sub_event(struct in_sdl_state *state, const SDL_Event *event,
 	int *kc_out, int *down_out, int *emu_out)
 {
 	static const int hat2uldr[4] = { SDLK_UP, SDLK_RIGHT, SDLK_DOWN, SDLK_LEFT };
@@ -427,7 +443,35 @@ static int handle_joy_event(struct in_sdl_state *state, SDL_Event *event,
 	int kc_axis_base = kc_button_base + state->joy_numbuttons;
 	int kc_hat_base = kc_axis_base + state->joy_numaxes;
 
+	int bmask, xrel, yrel;
+
 	switch (event->type) {
+	case SDL_MOUSEBUTTONDOWN:
+	case SDL_MOUSEBUTTONUP:
+		bmask = SDL_BUTTON(event->button.button);
+		if (event->button.state == SDL_PRESSED) {
+			// the wheel creates DOWN/UP events at the same time.
+			// the batched processing between 2 readouts would lead
+			// to them being cancelled out. count them instead.
+			if (event->button.button == SDL_BUTTON_WHEELDOWN)
+				state->mousewheel -= 1;
+			else if (event->button.button == SDL_BUTTON_WHEELUP)
+				state->mousewheel += 1;
+			else
+				state->mousebtns |= bmask;
+		} else	state->mousebtns &= ~bmask;
+		kc = event->button.button + kc_button_base + 80;
+		down = event->type == SDL_MOUSEBUTTONDOWN;
+		ret = 1;
+		break;
+	case SDL_MOUSEMOTION:
+		xrel = state->mevent.motion.xrel;
+		yrel = state->mevent.motion.yrel;
+		state->mevent = *event;
+		state->mevent.motion.xrel += xrel;
+		state->mevent.motion.yrel += yrel;
+		return 0;
+
 	case SDL_JOYAXISMOTION:
 		if ((unsigned)event->jaxis.axis >= (unsigned)state->joy_numaxes)
 			return 1;
@@ -567,15 +611,15 @@ static int collect_events(struct in_sdl_state *state, int *one_kc, int *one_down
 	return retval;
 }
 
-static int do_joy_events(struct in_sdl_state *state, int *one_kc, int *one_down)
+static int do_sub_events(struct in_sdl_state *state, int *one_kc, int *one_down)
 {
 	int is_emukey = 0, ret = 0, retval = 0;
 	SDL_Event *event;
 	unsigned int i;
 
-	for (i = 0; i < state->joy_event_count; ) {
-		event = &state->joy_events[i];
-		ret = handle_joy_event(state, event, one_kc, one_down, &is_emukey);
+	for (i = 0; i < state->ev_count; ) {
+		event = &state->ev_queue[i];
+		ret = handle_sub_event(state, event, one_kc, one_down, &is_emukey);
 		if (ret != 2) // not a repeated event
 			i++;
 		if (ret < 0) {
@@ -591,10 +635,10 @@ static int do_joy_events(struct in_sdl_state *state, int *one_kc, int *one_down)
 	}
 
 	// remove the handled events
-	if (i < state->joy_event_count)
-		memmove(&state->joy_events[0], &state->joy_events[i],
-			sizeof(state->joy_events[0]) * (state->joy_event_count - i));
-	state->joy_event_count -= i;
+	if (i < state->ev_count)
+		memmove(&state->ev_queue[0], &state->ev_queue[i],
+			sizeof(state->ev_queue[0]) * (state->ev_count - i));
+	state->ev_count -= i;
 
 	return retval;
 }
@@ -605,10 +649,10 @@ static int in_sdl_update(void *drv_data, const int *binds, int *result)
 	keybits_t mask;
 	int i, sym, bit, b;
 
-	if (!state->joy)
+	if (!state->parent)
 		collect_events(state, NULL, NULL);
 	else
-		do_joy_events(state, NULL, NULL);
+		do_sub_events(state, NULL, NULL);
 
 	if (!binds)
 		return 0;
@@ -635,10 +679,10 @@ static int in_sdl_update_kbd(void *drv_data, const int *binds, int *result)
 	keybits_t mask;
 	int i, sym, bit, b = 0;
 
-	if (!state->joy)
+	if (!state->parent)
 		collect_events(state, NULL, NULL);
 	else
-		do_joy_events(state, NULL, NULL);
+		do_sub_events(state, NULL, NULL);
 
 	if (!binds)
 		return 0;
@@ -676,33 +720,35 @@ static int in_sdl_update_analog(void *drv_data, int axis_id, int *result)
 
 static int in_sdl_update_pointer(void *drv_data, int id, int *result)
 {
-	struct in_sdl_state *state = drv_data;
+	struct in_sdl_state *state = drv_data, *mouse;
 	int max;
 
+	mouse = (state->mouse_state ? state->mouse_state : state);
+	state = (mouse->parent ? mouse->parent : state);
 	*result = 0;
 
 	switch (id) {
 	// absolute position, clipped at the window/screen border
 	case 0:	if ((max = state->revent.resize.w))
-			*result = state->mevent.motion.x * 2*1024/max - 1024;
+			*result = mouse->mevent.motion.x * 2*1024/max - 1024;
 		break;
 	case 1:	if ((max = state->revent.resize.h))
-			*result = state->mevent.motion.y * 2*1024/max - 1024;
+			*result = mouse->mevent.motion.y * 2*1024/max - 1024;
 		break;
 	// relative mouse movements since last query
 	case 2:	if ((max = state->revent.resize.w))
-			*result = state->mevent.motion.xrel * 2*1024/max;
-		state->mevent.motion.xrel = 0;
+			*result = mouse->mevent.motion.xrel * 2*1024/max;
+		mouse->mevent.motion.xrel = 0;
 		break;
 	case 3:	if ((max = state->revent.resize.h))
-			*result = state->mevent.motion.yrel * 2*1024/max;
-		state->mevent.motion.yrel = 0;
+			*result = mouse->mevent.motion.yrel * 2*1024/max;
+		mouse->mevent.motion.yrel = 0;
 		break;
-	case 9: *result = state->mousewheel;
-		state->mousewheel = 0;
+	case 9: *result = mouse->mousewheel;
+		mouse->mousewheel = 0;
 		break;
 	// buttons
-	case -1: *result = state->mousebtns;
+	case -1: *result = mouse->mousebtns;
 		break;
 	default: return -1;
 	}
@@ -715,10 +761,10 @@ static int in_sdl_update_keycode(void *drv_data, int *is_down)
 	struct in_sdl_state *state = drv_data;
 	int ret_kc = -1, ret_down = 0;
 
-	if (!state->joy)
+	if (!state->parent)
 		collect_events(state, &ret_kc, &ret_down);
 	else
-		do_joy_events(state, &ret_kc, &ret_down);
+		do_sub_events(state, &ret_kc, &ret_down);
 
 	if (is_down != NULL)
 		*is_down = ret_down;
@@ -787,7 +833,14 @@ static int in_sdl_clean_binds(void *drv_data, int *binds, int *def_binds)
 	for (t = 0; t < IN_BINDTYPE_COUNT; t++) {
 		for (i = 0; i < SDLK_LAST; i++) {
 			int offs = IN_BIND_OFFS(i, t);
-			if (state->joy && i < SDLK_WORLD_0)
+			if (state->joy && ((i < SDLK_UP || i > SDLK_LEFT) &&
+				    (i < SDLK_WORLD_0 || i >= SDLK_WORLD_40)))
+				binds[offs] = def_binds[offs] = 0;
+			else if (state->parent &&
+				    (i < SDLK_WORLD_80 || i > SDLK_WORLD_95))
+				binds[offs] = def_binds[offs] = 0;
+			else if (!state->parent &&
+				    (i >= SDLK_WORLD_0 && i <= SDLK_WORLD_95))
 				binds[offs] = def_binds[offs] = 0;
 			if (binds[offs]) {
 				if (t == IN_BINDTYPE_EMU)

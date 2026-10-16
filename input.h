@@ -123,6 +123,7 @@ struct in_pdata {
 	size_t jmap_size;
 	const char * const *key_names;
 	const struct in_default_bind *kbd_map;
+	int mouse_device;
 };
 
 /* to be called by drivers */
