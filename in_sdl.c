@@ -788,6 +788,10 @@ static int in_sdl_menu_translate(void *drv_data, int keycode, char *charcode)
 	if (state->joy) {
 		map = pdata->joy_map;
 		map_len = pdata->jmap_size;
+	} else if (state->parent && pdata->mouse_map) {
+		/* mouse: separate map, so button names stay correct */
+		map = pdata->mouse_map;
+		map_len = pdata->mmap_size;
 	} else {
 		map = pdata->key_map;
 		map_len = pdata->kmap_size;

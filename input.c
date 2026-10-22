@@ -503,8 +503,11 @@ int in_menu_wait_any(char *charcode, int timeout_ms)
 	return ret;
 }
 
-/* wait for menu input, do autorepeat */
-int in_menu_wait(int interesting, char *charcode, int autorep_delay_ms)
+/* wait for menu input, do autorepeat
+ * if poll_ms > 0, return 0 periodically while no menu key is held, so that
+ * the caller can poll for other input (mouse). */
+static int in_menu_wait_common(int interesting, char *charcode,
+	int autorep_delay_ms, int poll_ms)
 {
 	int ret, wait = 450;
 
@@ -514,11 +517,17 @@ int in_menu_wait(int interesting, char *charcode, int autorep_delay_ms)
 	/* wait until either key repeat or a new key has been pressed */
 	interesting |= PBTN_RDRAW;
 	do {
-		ret = in_menu_wait_any(charcode, wait);
+		int w = wait;
+
+		if (poll_ms > 0 && menu_key_state == 0 && (w < 0 || w > poll_ms))
+			w = poll_ms;
+		ret = in_menu_wait_any(charcode, w);
 		if (ret == 0 || ret != menu_key_prev)
 			menu_key_repeat = 0;
 		else
 			menu_key_repeat++;
+		if (ret == 0 && poll_ms > 0)
+			return 0;
 		wait = -1;
 	} while (!(ret & interesting));
 
@@ -526,6 +535,16 @@ int in_menu_wait(int interesting, char *charcode, int autorep_delay_ms)
 	if (ret & (PBTN_UP|PBTN_DOWN))  ret &= ~(PBTN_LEFT|PBTN_RIGHT);
 
 	return ret;
+}
+
+int in_menu_wait(int interesting, char *charcode, int autorep_delay_ms)
+{
+	return in_menu_wait_common(interesting, charcode, autorep_delay_ms, 0);
+}
+
+int in_menu_wait_poll(int interesting, char *charcode, int autorep_delay_ms, int poll_ms)
+{
+	return in_menu_wait_common(interesting, charcode, autorep_delay_ms, poll_ms);
 }
 
 const int *in_get_dev_binds(int dev_id)

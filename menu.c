@@ -68,6 +68,16 @@ static int g_menu_filter_off;
 static int g_border_style;
 static int border_left, border_right, border_top, border_bottom;
 
+/* mouse menu support */
+static int me_rect_x, me_rect_y, me_rect_w, me_rect_h;	/* last drawn menu rect */
+static int me_mouse_ok = -1;		/* -1: not probed, 0: none, 1: available */
+static int me_mouse_x, me_mouse_y;	/* last pointer position in menu pixels */
+static int me_mouse_btns;		/* last pointer button mask */
+static int me_mouse_inited;		/* have a position baseline */
+static int me_mouse_used;		/* menu is being driven by the mouse */
+static int me_romsel_start;		/* last drawn file list: first row */
+static int me_romsel_maxcnt;		/* last drawn file list: rows on screen */
+
 void menuscreen_memset_lines(unsigned short *dst, int c, int l)
 {
 	for (; l > 0; l--, dst += g_menuscreen_pp)
@@ -597,6 +607,12 @@ static void me_draw(const menu_entry *entries, int sel, void (*draw_more)(void))
 	if (x > 12) x = 12;
 #endif
 
+	/* remember where we drew, for mouse input */
+	me_rect_x = x;
+	me_rect_y = y;
+	me_rect_w = w;
+	me_rect_h = h;
+
 	/* draw */
 	menu_draw_begin(1, 0);
 	menu_draw_selection(x, y + vi_sel_ln * me_mfont_h, w);
@@ -724,11 +740,184 @@ static int me_process(menu_entry *entry, int is_next, int is_lr)
 	}
 }
 
+/* ---- mouse menu support ---- */
+
+static int me_mouse_have(void)
+{
+	int b;
+
+	if (me_mouse_ok < 0)
+		me_mouse_ok = (in_update_pointer(0, -1, &b) == 0);
+	return me_mouse_ok;
+}
+
+/* map a visible menu line to entry index, -1 if there is none / not selectable */
+static int me_line2idx(const menu_entry *entries, int line)
+{
+	int i, n = 0;
+
+	for (i = 0; entries[i].name != NULL; i++) {
+		if (!entries[i].enabled)
+			continue;
+		if (n++ == line)
+			return entries[i].selectable ? i : -1;
+	}
+
+	return -1;
+}
+
+/* cursor position in screen pixels; -1,-1 on failure */
+static int me_mouse_pos(int *x_out, int *y_out)
+{
+	int x, y;
+
+	if (in_update_pointer(0, 0, &x) != 0 || in_update_pointer(0, 1, &y) != 0) {
+		*x_out = -1;
+		*y_out = -1;
+		return -1;
+	}
+
+	/* -1024..1024 -> screen pixels */
+	*x_out = (x + 1024) * g_menuscreen_w / 2048;
+	*y_out = (y + 1024) * g_menuscreen_h / 2048;
+
+	return 0;
+}
+
+/* entry under the cursor, or -1; also returns cursor position in screen pixels */
+static int me_mouse_hit(const menu_entry *menu, int *x_out, int *y_out)
+{
+	int line;
+
+	if (me_mouse_pos(x_out, y_out) != 0)
+		return -1;
+
+	if (*x_out < me_rect_x || *x_out >= me_rect_x + me_rect_w ||
+	    *y_out < me_rect_y || *y_out >= me_rect_y + me_rect_h)
+		return -1;
+
+	line = (*y_out - me_rect_y) / me_mfont_h;
+	return me_line2idx(menu, line);
+}
+
+/* does this entry take LEFT/RIGHT (i.e. has a value the wheel can change)? */
+static int me_entry_has_value(const menu_entry *entry)
+{
+	return entry->beh >= MB_OPT_ONOFF && entry->beh <= MB_OPT_ENUM;
+}
+
+/* returns 1 if the selection should be redrawn */
+static int me_mouse_poll(const menu_entry *menu, int *sel, int *inp)
+{
+	int x = 0, y = 0, btns = 0, wheel = 0, idx, ret = 0;
+
+	if (!me_mouse_have())
+		return 0;
+
+	idx = me_mouse_hit(menu, &x, &y);
+	if (x < 0 || y < 0)
+		return 0;
+	in_update_pointer(0, -1, &btns);
+	in_update_pointer(0, 9, &wheel);
+
+	/* note which device is driving the menu */
+	if ((*inp & (PBTN_UP|PBTN_DOWN|PBTN_LEFT|PBTN_RIGHT|PBTN_MOK|
+		     PBTN_L|PBTN_R)) && !(btns & 1))
+		me_mouse_used = 0;
+
+	/*
+	 * wheel over a setting: change that setting instead of moving the
+	 * selection. up = previous value (LEFT), down = next value (RIGHT).
+	 */
+	if (wheel != 0 && idx >= 0 && (*inp & (PBTN_UP|PBTN_DOWN)) &&
+	    me_entry_has_value(&menu[idx]))
+	{
+		int key = (*inp & PBTN_UP) ? PBTN_LEFT : PBTN_RIGHT;
+
+		if (idx != *sel) {
+			*sel = idx;
+			ret = 1;
+		}
+		*inp &= ~(PBTN_UP|PBTN_DOWN);
+		*inp |= key;
+	}
+
+	if (!me_mouse_inited) {
+		/* don't let a parked cursor override the selection on entry */
+		me_mouse_inited = 1;
+	}
+	else if ((x != me_mouse_x || y != me_mouse_y) &&
+		 idx >= 0 && idx != *sel)
+	{
+		/* hover: only react to movement, so keys aren't fought */
+		*sel = idx;
+		me_mouse_used = 1;
+		ret = 1;
+	}
+
+	/* a click acts on the entry under the cursor, not the selected one */
+	if ((*inp & PBTN_MOK) && (btns & 1)) {
+		if ((me_mouse_btns & 1) || idx < 0)
+			*inp &= ~PBTN_MOK;	/* held down, or not on a selectable entry */
+		else {
+			*sel = idx;
+			me_mouse_used = 1;
+		}
+	}
+
+	me_mouse_x = x;
+	me_mouse_y = y;
+	me_mouse_btns = btns;
+
+	return ret;
+}
+
+/* ROM selector: hover selects the row under the cursor, click activates it */
+static int me_mouse_rowsel(int n, int *sel, int *inp)
+{
+	int x = 0, y = 0, btns = 0, pos, idx, ret = 0;
+
+	if (!me_mouse_have())
+		return 0;
+
+	if (me_mouse_pos(&x, &y) != 0)
+		return 0;
+	in_update_pointer(0, -1, &btns);
+
+	pos = y / me_sfont_h;
+	idx = pos - me_romsel_start;
+	if (pos < 0 || pos >= me_romsel_maxcnt || idx < 0 || idx >= n)
+		idx = -1;
+
+	if (!me_mouse_inited) {
+		me_mouse_inited = 1;
+	}
+	else if ((x != me_mouse_x || y != me_mouse_y) && idx >= 0 && idx != *sel) {
+		*sel = idx;
+		ret = 1;
+	}
+
+	if ((*inp & PBTN_MOK) && (btns & 1)) {
+		if ((me_mouse_btns & 1) || idx < 0)
+			*inp &= ~PBTN_MOK;	/* held down, or not on a list row */
+		else {
+			*sel = idx;
+			ret = 1;
+		}
+	}
+
+	me_mouse_x = x;
+	me_mouse_y = y;
+	me_mouse_btns = btns;
+
+	return ret;
+}
+
 static void debug_menu_loop(void);
 
 static int me_loop_d(menu_entry *menu, int *menu_sel, void (*draw_prep)(void), void (*draw_more)(void))
 {
-	int ret = 0, inp, sel = *menu_sel, menu_sel_max;
+	int ret = 0, inp, sel = *menu_sel, menu_sel_max, redraw = 1;
 
 	menu_sel_max = me_count(menu) - 1;
 	if (menu_sel_max < 0) {
@@ -743,14 +932,37 @@ static int me_loop_d(menu_entry *menu, int *menu_sel, void (*draw_prep)(void), v
 	me_draw(menu, sel, NULL);
 	while (in_menu_wait_any(NULL, 50) & (PBTN_MOK|PBTN_MBACK|PBTN_MENU));
 
+	me_mouse_inited = 0;
+	me_mouse_btns = 0;
+
+	/* if this menu was opened with the mouse, start on the entry under it */
+	if (me_mouse_used && me_mouse_have()) {
+		int x, y, idx;
+
+		idx = me_mouse_hit(menu, &x, &y);
+		if (idx >= 0)
+			sel = idx;
+	}
+
 	for (;;)
 	{
-		if (draw_prep != NULL)
-			draw_prep();
+		if (redraw) {
+			if (draw_prep != NULL)
+				draw_prep();
 
-		me_draw(menu, sel, draw_more);
-		inp = in_menu_wait(PBTN_UP|PBTN_DOWN|PBTN_LEFT|PBTN_RIGHT|
-			PBTN_MOK|PBTN_MBACK|PBTN_MENU|PBTN_L|PBTN_R, NULL, 70);
+			me_draw(menu, sel, draw_more);
+		}
+
+		inp = in_menu_wait_poll(PBTN_UP|PBTN_DOWN|PBTN_LEFT|PBTN_RIGHT|
+			PBTN_MOK|PBTN_MBACK|PBTN_MENU|PBTN_L|PBTN_R, NULL, 70,
+			me_mouse_have() ? 25 : 0);
+
+		redraw = (inp != 0);
+		if (me_mouse_poll(menu, &sel, &inp))
+			redraw = 1;
+		if (menu_error_msg[0] != 0)
+			redraw = 1;
+
 		if (inp & (PBTN_MENU|PBTN_MBACK))
 			break;
 
@@ -792,6 +1004,7 @@ static int me_loop_d(menu_entry *menu, int *menu_sel, void (*draw_prep)(void), v
 		}
 	}
 	*menu_sel = sel;
+	me_mouse_used = 0;	/* only inherit the flag into direct submenus */
 
 	return ret;
 }
@@ -882,14 +1095,17 @@ static void do_delete(const char *fpath, const char *fname)
 // -------------- ROM selector --------------
 
 static void draw_dirlist(char *curdir, struct dirent **namelist,
-	int n, int sel, int show_help)
+	int n, int sel, int start, int show_help)
 {
-	int max_cnt, start, i, x, pos;
+	int max_cnt, i, x, pos;
 	void *darken_ptr;
 	char buff[64];
 
 	max_cnt = g_menuscreen_h / me_sfont_h;
-	start = max_cnt / 2 - sel;
+
+	/* remember geometry for mouse input */
+	me_romsel_start = start;
+	me_romsel_maxcnt = max_cnt;
 
 	menu_draw_begin(1, 1);
 
@@ -1025,6 +1241,7 @@ static const char *menu_loop_romsel_d(char *curr_path, int len,
 	int (*filter)(const struct dirent *);
 	struct dirent **namelist = NULL;
 	int n = 0, inp = 0, sel = 0, show_help = 0;
+	int max_cnt, start, redraw = 1;
 	char *curr_path_restore = NULL;
 	const char *ret = NULL;
 	char cinp;
@@ -1124,18 +1341,34 @@ rescan:
 	}
 
 	/* make sure action buttons are not pressed on entering menu */
-	draw_dirlist(curr_path, namelist, n, sel, show_help);
+	max_cnt = g_menuscreen_h / me_sfont_h;
+	start = max_cnt / 2 - sel;
+	draw_dirlist(curr_path, namelist, n, sel, start, show_help);
 	while (in_menu_wait_any(NULL, 50) & (PBTN_MOK|PBTN_MBACK|PBTN_MENU))
 		;
 
+	me_mouse_inited = 0;
+	me_mouse_btns = 0;
+	redraw = 1;
+
 	for (;;)
 	{
-		if (draw_prep != NULL)
-			draw_prep();
-		draw_dirlist(curr_path, namelist, n, sel, show_help);
-		inp = in_menu_wait(PBTN_UP|PBTN_DOWN|PBTN_LEFT|PBTN_RIGHT
+		if (redraw) {
+			if (draw_prep != NULL)
+				draw_prep();
+			max_cnt = g_menuscreen_h / me_sfont_h;
+			draw_dirlist(curr_path, namelist, n, sel, start, show_help);
+		}
+
+		inp = in_menu_wait_poll(PBTN_UP|PBTN_DOWN|PBTN_LEFT|PBTN_RIGHT
 			| PBTN_L|PBTN_R|PBTN_MA2|PBTN_MA3|PBTN_MOK|PBTN_MBACK
-			| PBTN_MENU|PBTN_CHAR, &cinp, 33);
+			| PBTN_MENU|PBTN_CHAR, &cinp, 33,
+			me_mouse_have() ? 25 : 0);
+
+		redraw = (inp != 0);
+		if (me_mouse_rowsel(n, &sel, &inp))
+			redraw = 1;
+
 		if (inp & PBTN_MA3)   {
 			g_menu_filter_off = !g_menu_filter_off;
 			snprintf(sel_fname, sizeof(sel_fname), "%s",
@@ -1209,10 +1442,16 @@ rescan:
 			sel = dirent_seek_char(namelist, n, sel, cinp);
 		}
 
+		/* keep the selection centered; hover must not move the list */
+		if (inp & (PBTN_UP|PBTN_DOWN|PBTN_LEFT|PBTN_RIGHT|
+			   PBTN_L|PBTN_R|PBTN_CHAR))
+			start = max_cnt / 2 - sel;
+
 		if (inp & PBTN_MBACK)
 			break;
 
-		if (show_help > 0)
+		/* don't let idle polls burn the help message */
+		if (show_help > 0 && inp != 0)
 			show_help--;
 	}
 

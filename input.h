@@ -124,6 +124,8 @@ struct in_pdata {
 	const char * const *key_names;
 	const struct in_default_bind *kbd_map;
 	int mouse_device;
+	const struct menu_keymap *mouse_map;
+	size_t mmap_size;
 };
 
 /* to be called by drivers */
@@ -145,6 +147,7 @@ int  in_update_keycode(int *dev_id, int *is_down, char *charcode, int timeout_ms
 int  in_update_kbd(int *result);
 int  in_menu_wait_any(char *charcode, int timeout_ms);
 int  in_menu_wait(int interesting, char *charcode, int autorep_delay_ms);
+int  in_menu_wait_poll(int interesting, char *charcode, int autorep_delay_ms, int poll_ms);
 int  in_config_parse_dev(const char *dev_name);
 int  in_config_bind_key(int dev_id, const char *key, int binds, int bind_type);
 int  in_config_bind_kbd_key(int dev_id, const char *key, int kbd_key);
