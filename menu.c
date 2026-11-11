@@ -267,12 +267,13 @@ static char tolower_simple(char c)
 
 void menu_init_base_scale(unsigned int scale)
 {
-	int i, c, l, pos;
-	unsigned char *fd, *fds;
+	int c, l, pos;
+	unsigned char *fd;
+	unsigned char fb[128 * 8 * 10 / 2] = { 0 }; // 1x font, 4bpp
 	char buff[256];
 	FILE *f;
 
-	if (scale != 1 && scale != 2) {
+	if (scale < 1 || scale > 4) {
 		assert(0); // not supported
 		return;
 	}
@@ -287,7 +288,7 @@ void menu_init_base_scale(unsigned int scale)
 	me_sfont_w = 6 * scale, me_sfont_h = 10 * scale;
 
 	// generate default 8x10 font from fontdata8x8
-	for (c = 0, fd = menu_font_data; c < 128; c++)
+	for (c = 0, fd = fb; c < 128; c++)
 	{
 		for (l = 0; l < 8; l++)
 		{
@@ -304,25 +305,23 @@ void menu_init_base_scale(unsigned int scale)
 		fd += 8*2/2; // 2 empty lines
 	}
 
-	if (scale > 1) {
-		// expand the default font
-		fds = menu_font_data + 128 * 160 / 2 - 4;
-		fd  = menu_font_data + 256 * 320 / 2 - 1;
-		for (c = 255; c >= 0; c--)
+	// expand the font to wanted scale
+	for (c = 0, fd = menu_font_data; c < 128; c++)
+	{
+		const unsigned char *src = fb + c * (8 * 10 / 2);
+
+		for (l = 0; l < 10; l++, src += 4)
 		{
-			for (l = 9; l >= 0; l--, fds -= 4)
+			int sy, b;
+			for (sy = 0; sy < (int)scale; sy++)
 			{
-				for (i = 3; i >= 0; i--) {
-					int px = fds[i] & 0x0f;
-					*fd-- = px | (px << 4);
-					px = (fds[i] >> 4) & 0x0f;
-					*fd-- = px | (px << 4);
-				}
-				for (i = 3; i >= 0; i--) {
-					int px = fds[i] & 0x0f;
-					*fd-- = px | (px << 4);
-					px = (fds[i] >> 4) & 0x0f;
-					*fd-- = px | (px << 4);
+				for (b = 0; b < 4 * (int)scale; b++)
+				{
+					int px0 = 2 * b / (int)scale;
+					int px1 = (2 * b + 1) / (int)scale;
+					int left  = (src[px0 / 2] >> ((px0 & 1) ? 0 : 4)) & 0x0f;
+					int right = (src[px1 / 2] >> ((px1 & 1) ? 0 : 4)) & 0x0f;
+					*fd++ = (left << 4) | right;
 				}
 			}
 		}
