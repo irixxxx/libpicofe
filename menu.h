@@ -131,6 +131,7 @@ extern int me_sfont_w, me_sfont_h;
 
 void menu_init_base(void);
 void menu_init_base_scale(unsigned int scale);
+void menu_set_mouse_enabled(int enable);
 void menu_update_msg(const char *msg);
 void text_out16(int x, int y, const char *texto, ...);
 void smalltext_out16(int x, int y, const char *texto, int color);

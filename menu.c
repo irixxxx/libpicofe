@@ -75,6 +75,7 @@ static int me_mouse_x, me_mouse_y;	/* last pointer position in menu pixels */
 static int me_mouse_btns;		/* last pointer button mask */
 static int me_mouse_inited;		/* have a position baseline */
 static int me_mouse_used;		/* menu is being driven by the mouse */
+static int me_mouse_enabled = 1;	/* allow the mouse to drive menus */
 static int me_romsel_start;		/* last drawn file list: first row */
 static int me_romsel_maxcnt;		/* last drawn file list: rows on screen */
 
@@ -746,9 +747,25 @@ static int me_mouse_have(void)
 {
 	int b;
 
+	if (!me_mouse_enabled)
+		return 0;
 	if (me_mouse_ok < 0)
 		me_mouse_ok = (in_update_pointer(0, -1, &b) == 0);
 	return me_mouse_ok;
+}
+
+/* disable/enable all mouse control of the menu code; in-game mouse input
+ * is not affected, only the menu itself */
+void menu_set_mouse_enabled(int enable)
+{
+	enable = !!enable;
+	if (me_mouse_enabled == enable)
+		return;
+
+	me_mouse_enabled = enable;
+	me_mouse_inited = 0;
+	me_mouse_used = 0;
+	me_mouse_btns = 0;
 }
 
 /* map a visible menu line to entry index, -1 if there is none / not selectable */
@@ -820,10 +837,17 @@ static int me_mouse_poll(const menu_entry *menu, int *sel, int *inp)
 	in_update_pointer(0, -1, &btns);
 	in_update_pointer(0, 9, &wheel);
 
-	/* note which device is driving the menu */
-	if ((*inp & (PBTN_UP|PBTN_DOWN|PBTN_LEFT|PBTN_RIGHT|PBTN_MOK|
-		     PBTN_L|PBTN_R)) && !(btns & 1))
+	/*
+	 * note which device is driving the menu; a wheel is a mouse action,
+	 * so it must not be mistaken for a keyboard cursor key
+	 */
+	if (!wheel && (*inp & (PBTN_UP|PBTN_DOWN|PBTN_LEFT|PBTN_RIGHT|PBTN_MOK|
+			       PBTN_L|PBTN_R)) && !(btns & 1))
 		me_mouse_used = 0;
+
+	/* the mouse takes over only after a deliberate click or wheel */
+	if (wheel != 0 && idx >= 0)
+		me_mouse_used = 1;
 
 	/*
 	 * wheel over a setting: change that setting instead of moving the
@@ -846,12 +870,12 @@ static int me_mouse_poll(const menu_entry *menu, int *sel, int *inp)
 		/* don't let a parked cursor override the selection on entry */
 		me_mouse_inited = 1;
 	}
-	else if ((x != me_mouse_x || y != me_mouse_y) &&
+	else if (me_mouse_used && (x != me_mouse_x || y != me_mouse_y) &&
 		 idx >= 0 && idx != *sel)
 	{
-		/* hover: only react to movement, so keys aren't fought */
+		/* hover follows the pointer only while the mouse is driving;
+		 * a key press above hands control back to the keyboard */
 		*sel = idx;
-		me_mouse_used = 1;
 		ret = 1;
 	}
 
@@ -875,7 +899,7 @@ static int me_mouse_poll(const menu_entry *menu, int *sel, int *inp)
 /* ROM selector: hover selects the row under the cursor, click activates it */
 static int me_mouse_rowsel(int n, int *sel, int *inp)
 {
-	int x = 0, y = 0, btns = 0, pos, idx, ret = 0;
+	int x = 0, y = 0, btns = 0, wheel = 0, pos, idx, ret = 0;
 
 	if (!me_mouse_have())
 		return 0;
@@ -883,6 +907,12 @@ static int me_mouse_rowsel(int n, int *sel, int *inp)
 	if (me_mouse_pos(&x, &y) != 0)
 		return 0;
 	in_update_pointer(0, -1, &btns);
+	in_update_pointer(0, 9, &wheel);
+
+	/* keyboard navigation takes the list back from the mouse */
+	if (!wheel && (*inp & (PBTN_UP|PBTN_DOWN|PBTN_LEFT|PBTN_RIGHT|
+			       PBTN_L|PBTN_R)))
+		me_mouse_used = 0;
 
 	pos = y / me_sfont_h;
 	idx = pos - me_romsel_start;
@@ -892,7 +922,8 @@ static int me_mouse_rowsel(int n, int *sel, int *inp)
 	if (!me_mouse_inited) {
 		me_mouse_inited = 1;
 	}
-	else if ((x != me_mouse_x || y != me_mouse_y) && idx >= 0 && idx != *sel) {
+	else if (me_mouse_used && (x != me_mouse_x || y != me_mouse_y) &&
+		 idx >= 0 && idx != *sel) {
 		*sel = idx;
 		ret = 1;
 	}
